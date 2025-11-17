@@ -1,7 +1,7 @@
 import pygame
 import sys
 import os
-from typing import Callable, Optional, Tuple, Dict, List
+from typing import Callable, Optional, Tuple, Dict, List, Set
 from enum import Enum
 import time
 
@@ -116,7 +116,7 @@ class WordProcess:
         return font.size(self.text)
 
 
-# ==================== 音频生成器 (改进版本) ====================
+# ==================== 音频生成器 ====================
 class SynthGenerator:
     """改进的正弦波合成器 - 更真实的音色"""
     
@@ -138,29 +138,22 @@ class SynthGenerator:
     @staticmethod
     def generate_tone(frequency: float, duration_ms: int, 
                       sample_rate: int = 44100, volume: float = 0.3) -> pygame.mixer.Sound:
-        """
-        生成改进的音色：
-        - 主波形（正弦波）+ 谐音添加
-        - 更平滑的 ADSR 包络
-        - 更自然的衰减
-        """
+        """生成改进的音色"""
         num_samples = int(sample_rate * duration_ms / 1000)
         t = np.linspace(0, duration_ms / 1000, num_samples, False)
         
         # 主波形（带谐音）
         fundamental = np.sin(2 * np.pi * frequency * t)
-        # 添加第二泛音（1/4 振幅）
         harmonic2 = 0.25 * np.sin(2 * np.pi * frequency * 2 * t)
-        # 添加第三泛音（1/8 振幅）
         harmonic3 = 0.125 * np.sin(2 * np.pi * frequency * 3 * t)
         
         wave = fundamental + harmonic2 + harmonic3
         
         # 改进的 ADSR 包络
-        attack_time = 0.02  # 20ms
-        decay_time = 0.05   # 50ms
+        attack_time = 0.02
+        decay_time = 0.05
         sustain_level = 0.7
-        release_time = 0.5  # 500ms
+        release_time = 0.5
         
         attack_samples = int(sample_rate * attack_time)
         decay_samples = int(sample_rate * decay_time)
@@ -169,31 +162,25 @@ class SynthGenerator:
         
         envelope = np.ones(num_samples)
         
-        # Attack: 0 -> 1
         if attack_samples > 0:
             envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
         
-        # Decay: 1 -> sustain_level
         if decay_samples > 0:
             envelope[attack_samples:attack_samples + decay_samples] = \
                 np.linspace(1, sustain_level, decay_samples)
         
-        # Sustain: 保持在 sustain_level
         sustain_start = attack_samples + decay_samples
         sustain_end = sustain_start + sustain_samples
         if sustain_end > sustain_start:
             envelope[sustain_start:sustain_end] = sustain_level
         
-        # Release: sustain_level -> 0
         if release_samples > 0:
             envelope[-release_samples:] = np.linspace(sustain_level, 0, release_samples)
         
         wave = wave * envelope * volume
         
-        # 转换为 16 位 PCM
         wave_int16 = np.clip(wave * 32767, -32768, 32767).astype(np.int16)
         
-        # 创建立体声
         stereo = np.zeros((len(wave_int16), 2), dtype=np.int16)
         stereo[:, 0] = wave_int16
         stereo[:, 1] = wave_int16
@@ -251,8 +238,7 @@ class Button:
         
         is_hovered = self.rect.collidepoint(mouse_pos)
         is_mouse_pressed = is_hovered and mouse_pressed
-        # 优先显示按下状态（包括键盘触发和回放视觉触发），
-        # 以便 toggle（is_active）按钮仍能在再次点击时被识别为按下/释放。
+        
         if self.playback_pressed or self.key_pressed or is_mouse_pressed:
             self.state = ButtonState.PRESSED
         elif self.is_active:
@@ -279,17 +265,12 @@ class Button:
         """直接设置激活状态（不触发点击）"""
         self.is_active = active 
     
-    def is_clicked(self) -> bool:
-        """检查按钮是否在这一帧被点击"""
-        return self.prev_state != ButtonState.PRESSED and self.state == ButtonState.PRESSED
-    
     def is_released(self) -> bool:
-        """检查按钮是否在这一帧被释放（鼠标从按下变为正常或悬停）"""
+        """检查按钮是否在这一帧被释放"""
         mouse_pos = pygame.mouse.get_pos()
         is_hovered = self.rect.collidepoint(mouse_pos)
         mouse_pressed = pygame.mouse.get_pressed()[0]
         
-        # 前一帧是按下状态，这一帧不再是按下状态
         was_pressed = self.prev_state == ButtonState.PRESSED
         is_no_longer_pressed = not mouse_pressed
         
@@ -301,7 +282,7 @@ class MidiPerformer:
     """MIDI 演奏器 - 支持录制、回放、保存、加载"""
     
     def __init__(self, screen_width: int = 1200, screen_height: int = 550):
-        pygame.display.set_caption("MIDI 演奏器 (带录制、保存、加载)")
+        pygame.display.set_caption("MIDI 演奏器 (录制、保存、加载)")
         self.screen = pygame.display.set_mode((screen_width, screen_height))
         self.clock = pygame.time.Clock()
         
@@ -311,7 +292,7 @@ class MidiPerformer:
         self.font_label = pygame.font.Font(None, 18)
         self.font_status = pygame.font.Font(None, 28)
         
-        # sound_cache keyed by (midi_note, duration_ms)
+        # 音频缓存：缓存生成的音调
         self.sound_cache: Dict[Tuple[int, int], pygame.mixer.Sound] = {}
         
         self.buttons: List[Button] = []
@@ -321,23 +302,28 @@ class MidiPerformer:
         self.start_midi = 60
         self.end_midi = 84
         
+        # 录制状态
         self.is_recording = False
-        self.is_playing_back = False
-        self.recorded_track: List[Tuple[int, int]] = []
+        self.recorded_track: List[Tuple[int, int]] = []  # (timestamp_ms, midi_note)
         self.recording_start_time = 0
+        
+        # 播放状态
+        self.is_playing_back = False
         self.playback_start_time = 0
         self.playback_note_index = 0
         
-        self.current_file_name = "未命名.mid"
+        # 防止双触发：记录当前播放中的音符
+        self.currently_playing_notes: Set[int] = set()
         
+        self.current_file_name = "未命名.mid"
         self.PLAYBACK_NOTE_OFF_EVENT = pygame.USEREVENT + 1
-
-        # 播放设置
+        
         self.master_volume = 0.8
-        self.note_duration_ms = 1000  # 每个生成音的时长（可由 sustain 控制）
+        self.note_duration_ms = 1000
+        self.sustain_active = False
         self.volume_rect: Optional[pygame.Rect] = None
         self.volume_dragging = False
-
+        
         self._create_buttons()
     
     def _create_standard_renderer(
@@ -371,12 +357,11 @@ class MidiPerformer:
     def _create_buttons(self):
         """创建所有按钮"""
         
-        # --- 控制按钮（居中排列） ---
+        # --- 控制按钮 ---
         control_y = 70
         btn_width, btn_height = 110, 48
         margin = 14
         center_x = self.screen.get_width() / 2
-        # 我们会放 6 个控制按钮：Record, Play, Stop, Save, Load, Sustain
         num_controls = 6
         total_controls_width = num_controls * btn_width + (num_controls - 1) * margin
         start_x = center_x - total_controls_width / 2
@@ -467,7 +452,7 @@ class MidiPerformer:
         btn_load.set_appearances({s: load_renderer for s in ButtonState})
         self.buttons.append(btn_load)
         
-        # Sustain 按钮（延长音符时长）
+        # Sustain 按钮
         btn_sustain = Button(start_x + (btn_width + margin) * 5, control_y, btn_width, btn_height,
                              on_click=self._on_sustain_click)
         btn_sustain.is_toggle = True
@@ -478,12 +463,11 @@ class MidiPerformer:
             ButtonState.ACTIVE: (200, 170, 80),
         }
         sustain_renderer = self._create_standard_renderer(
-            btn_sustain, lambda: "Sustain" if btn_sustain.is_active else "Sustain", sustain_colors
+            btn_sustain, lambda: "Sustain", sustain_colors
         )
         btn_sustain.set_appearances({s: sustain_renderer for s in ButtonState})
         self.buttons.append(btn_sustain)
 
-        # 设置音量滑块位置（紧随控制按钮下方）
         self.volume_rect = pygame.Rect(int(center_x - 150), int(control_y + btn_height + 12), 300, 12)
         
         # --- 琴键按钮 ---
@@ -584,6 +568,7 @@ class MidiPerformer:
             
             self.recorded_track = []
             self.recording_start_time = pygame.time.get_ticks()
+            self.currently_playing_notes.clear()
             print("--- 开始录制 ---")
         else:
             self.is_recording = False
@@ -607,6 +592,7 @@ class MidiPerformer:
             
             self.playback_start_time = pygame.time.get_ticks()
             self.playback_note_index = 0
+            self.currently_playing_notes.clear()
             print("--- 开始播放 ---")
         else:
             self.is_playing_back = False
@@ -617,6 +603,7 @@ class MidiPerformer:
         print("--- 全部停止 ---")
         self.is_recording = False
         self.is_playing_back = False
+        self.currently_playing_notes.clear()
         
         for btn in self.buttons:
             if btn.on_click == self._on_record_click or btn.on_click == self._on_play_click:
@@ -661,6 +648,16 @@ class MidiPerformer:
         if file_path:
             self._load_midi_file(file_path)
 
+    def _on_sustain_click(self, is_active: bool):
+        """处理 Sustain 按钮"""
+        self.sustain_active = is_active
+        if is_active:
+            self.note_duration_ms = 2000
+            print("Sustain ON: 音符时长延长")
+        else:
+            self.note_duration_ms = 1000
+            print("Sustain OFF: 使用默认音符时长")
+
     def _save_midi_file(self, file_path: str):
         """保存为 MIDI 文件"""
         try:
@@ -668,31 +665,22 @@ class MidiPerformer:
             track = MidiTrack()
             mid.tracks.append(track)
             
-            # 转换录制的时间戳为 MIDI 时间（使用 ticks_per_beat）
             ticks_per_beat = 480
             bpm = 120
             microseconds_per_beat = 60 * 1000000 // bpm
             
-            # 添加速度元事件
             track.append(MetaMessage('set_tempo', tempo=microseconds_per_beat))
-            
-            # 转换毫秒为 MIDI tick
-            # 1 beat = microseconds_per_beat microseconds
-            # 1 ms = 1000 microseconds
-            # tick = (ms / 1000) * (bpm / 60) * ticks_per_beat
             
             current_time_ticks = 0
             
             for timestamp_ms, midi_note in self.recorded_track:
-                # 转换毫秒到 tick
                 time_ticks = int((timestamp_ms / 1000.0) * (bpm / 60.0) * ticks_per_beat)
                 delta_ticks = time_ticks - current_time_ticks
                 
-                # Note On
                 track.append(Message('note_on', note=midi_note, velocity=100, time=delta_ticks))
                 current_time_ticks = time_ticks
             
-            # 在所有音符之后添加 Note Off 消息
+            # 添加 Note Off 消息
             for midi_note in set(note for _, note in self.recorded_track):
                 track.append(Message('note_off', note=midi_note, velocity=0, time=0))
             
@@ -714,32 +702,55 @@ class MidiPerformer:
             print(f"✗ 保存失败: {e}")
 
     def _load_midi_file(self, file_path: str):
-        """加载 MIDI 文件"""
+        """加载 MIDI 文件 - 支持多轨、速度变化"""
         try:
             mid = MidiFile(file_path)
             
-            # 清空旧数据
             self._on_stop_click(True)
             self.recorded_track = []
             
-            # 提取事件
-            bpm = 120
-            microseconds_per_beat = 60 * 1000000 // bpm
-            ticks_per_beat = 480
+            # 默认参数
+            ticks_per_beat = mid.ticks_per_beat if mid.ticks_per_beat else 480
             
-            current_time_ms = 0
+            # 从所有轨道收集事件（支持多轨）
+            all_events = []
             
-            for msg in mid.tracks[0]:
-                if msg.type == 'set_tempo':
-                    microseconds_per_beat = msg.tempo
+            for track in mid.tracks:
+                current_time_ticks = 0
+                current_tempo = 500000  # 默认 120 BPM
                 
-                elif msg.type == 'note_on' and msg.velocity > 0:
-                    # 转换 tick 到毫秒
-                    # ms = (tick / ticks_per_beat) * (microseconds_per_beat / 1000000) * 1000
-                    time_ms = int((msg.time / ticks_per_beat) * (microseconds_per_beat / 1000000) * 1000)
-                    current_time_ms += time_ms
+                for msg in track:
+                    # 累加相对时间
+                    current_time_ticks += msg.time
                     
-                    self.recorded_track.append((current_time_ms, msg.note))
+                    # 更新速度
+                    if msg.type == 'set_tempo':
+                        current_tempo = msg.tempo
+                    
+                    # 收集 note_on 事件（velocity > 0 表示真正的按下）
+                    elif msg.type == 'note_on' and msg.velocity > 0:
+                        # 转换 ticks 到毫秒
+                        # ms = (ticks / ticks_per_beat) * (microseconds_per_beat / 1000000) * 1000
+                        time_ms = int((current_time_ticks / ticks_per_beat) * (current_tempo / 1000000) * 1000)
+                        all_events.append((time_ms, msg.note))
+                    
+                    # note_off 也视为释放（有些 MIDI 用这个代替 velocity=0）
+                    elif msg.type == 'note_off':
+                        pass  # 我们只记录 note_on 事件
+            
+            # 按时间戳排序
+            all_events.sort(key=lambda x: x[0])
+            
+            # 去重：如果同一个音符在相同时间戳多次出现，只保留一次
+            self.recorded_track = []
+            last_note = None
+            last_time = None
+            
+            for time_ms, midi_note in all_events:
+                if not (time_ms == last_time and midi_note == last_note):
+                    self.recorded_track.append((time_ms, midi_note))
+                    last_time = time_ms
+                    last_note = midi_note
             
             self.current_file_name = os.path.basename(file_path)
             
@@ -749,6 +760,8 @@ class MidiPerformer:
             root.destroy()
             
             print(f"✓ 已加载 MIDI 文件: {file_path} ({len(self.recorded_track)} 个音符)")
+            print(f"  轨道数: {len(mid.tracks)}")
+            print(f"  ticks_per_beat: {ticks_per_beat}")
         
         except Exception as e:
             root = tk.Tk()
@@ -757,17 +770,13 @@ class MidiPerformer:
             root.destroy()
             print(f"✗ 加载失败: {e}")
 
-    def _on_sustain_click(self, is_active: bool):
-        """处理 Sustain 按钮：切换音符生成时长"""
-        if is_active:
-            self.note_duration_ms = 2000
-            print("Sustain ON: 音符时长延长")
-        else:
-            self.note_duration_ms = 1000
-            print("Sustain OFF: 使用默认音符时长")
-
     def _play_note(self, midi_note: int):
-        """播放音符，并处理录制"""
+        """播放音符"""
+        # 防止鼠标和键盘双触发
+        if midi_note in self.currently_playing_notes:
+            return
+        
+        self.currently_playing_notes.add(midi_note)
         
         # 录制
         if self.is_recording:
@@ -785,13 +794,16 @@ class MidiPerformer:
             snd = SynthGenerator.generate_tone(frequency, duration_ms=duration_ms, volume=0.3)
             self.sound_cache[cache_key] = snd
 
-        # 播放音频（设置主音量）
+        # 播放音频
         sound = self.sound_cache[cache_key]
         try:
             sound.set_volume(self.master_volume)
         except Exception:
             pass
         sound.play()
+        
+        # 清除防重复标记
+        pygame.time.set_timer(pygame.event.Event(pygame.USEREVENT + 2, note=midi_note), 100, 1)
     
     def _trigger_playback_press(self, midi_note: int):
         """用于视觉回放，触发按钮按下"""
@@ -809,8 +821,13 @@ class MidiPerformer:
                 return False
             
             elif event.type == self.PLAYBACK_NOTE_OFF_EVENT:
-                if event.note in self.note_to_button:
+                if hasattr(event, 'note') and event.note in self.note_to_button:
                     self.note_to_button[event.note].playback_pressed = False
+            
+            # 清除防重复标记
+            elif event.type == pygame.USEREVENT + 2:
+                if hasattr(event, 'note'):
+                    self.currently_playing_notes.discard(event.note)
             
             elif event.type == pygame.KEYDOWN:
                 if event.key in self.key_to_button:
@@ -830,7 +847,6 @@ class MidiPerformer:
                 if event.button == 1 and self.volume_rect is not None:
                     if self.volume_rect.collidepoint(event.pos):
                         self.volume_dragging = True
-                        # 立刻更新音量
                         rel_x = event.pos[0] - self.volume_rect.x
                         self.master_volume = max(0.0, min(1.0, rel_x / self.volume_rect.width))
                         print(f"音量: {int(self.master_volume*100)}%")
@@ -843,7 +859,6 @@ class MidiPerformer:
                 if self.volume_dragging and self.volume_rect is not None:
                     rel_x = event.pos[0] - self.volume_rect.x
                     self.master_volume = max(0.0, min(1.0, rel_x / self.volume_rect.width))
-                    # 这里不打印太多信息，直接设置音量
         
         return True
     
@@ -853,7 +868,7 @@ class MidiPerformer:
         # 处理回放
         if self.is_playing_back:
             if self.playback_note_index >= len(self.recorded_track):
-                # 等待最后一个音的自然尾声结束后再结束播放（避免最后一个音被立即 stop 中断）
+                # 等待最后一个音自然结束
                 if self.recorded_track:
                     last_ts = self.recorded_track[-1][0]
                 else:
@@ -863,13 +878,13 @@ class MidiPerformer:
                 playback_elapsed = current_time - self.playback_start_time
 
                 if playback_elapsed >= last_ts + int(self.note_duration_ms):
-                    # 播放真正结束：只关闭播放状态，不强制停止混音器
+                    # 播放真正结束
                     self.is_playing_back = False
+                    self.currently_playing_notes.clear()
                     for btn in self.buttons:
                         if btn.on_click == self._on_play_click:
                             btn.set_active(False)
                     print("--- 播放结束（自然收尾） ---")
-                # else: 等待音频自然结束
             else:
                 current_time = pygame.time.get_ticks()
                 playback_time = current_time - self.playback_start_time
@@ -890,7 +905,7 @@ class MidiPerformer:
         for button in self.buttons:
             button.update(mouse_pos, mouse_pressed)
             
-            # [修复] 只在鼠标真正释放时才触发点击（is_released）
+            # 只在鼠标真正释放时才触发点击
             if button.is_released() and not button.key_pressed and not button.playback_pressed:
                 note_name = SynthGenerator.MIDI_NOTE_NAMES.get(button.midi_note, 'UI Button')
                 if note_name:
@@ -936,17 +951,15 @@ class MidiPerformer:
         
         # 音量滑块
         if self.volume_rect is not None:
-            # 背景轨道
             pygame.draw.rect(self.screen, (120, 120, 120), self.volume_rect, border_radius=6)
-            # 已填充部分
             filled_width = int(self.volume_rect.width * self.master_volume)
             filled_rect = pygame.Rect(self.volume_rect.x, self.volume_rect.y, filled_width, self.volume_rect.height)
             pygame.draw.rect(self.screen, (70, 200, 120), filled_rect, border_radius=6)
-            # 拖动手柄
+            
             handle_x = int(self.volume_rect.x + filled_width)
             handle_y = int(self.volume_rect.y + self.volume_rect.height / 2)
             pygame.draw.circle(self.screen, (230, 230, 230), (handle_x, handle_y), 8)
-            # 标签
+            
             vol_label = self.font_label.render(f"Volume: {int(self.master_volume*100)}%", True, (200, 200, 200))
             vol_label_rect = vol_label.get_rect(center=(self.volume_rect.centerx, self.volume_rect.y - 12))
             self.screen.blit(vol_label, vol_label_rect)

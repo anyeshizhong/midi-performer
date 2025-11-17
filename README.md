@@ -14,7 +14,7 @@
 
 1. 克隆仓库
 2. 安装依赖：`pip install -r requirements.txt`
-3. 运行程序：`python src/midi_performer.py`
+3. 运行程序：`python run.py`
 
 ## 使用说明
 
